@@ -152,6 +152,13 @@ struct WorkspaceView: View {
     @State private var canvasScale: CGFloat = 1.0
     @State private var scaleStart: CGFloat = 1.0
     @State private var flipped: Set<UUID> = []
+    // input (always at bottom)
+    @State private var draftFront: String = ""
+    @State private var draftBack: String = ""
+    @State private var keyboardHeight: CGFloat = 0
+    
+    enum DraftSide { case front, back }
+    @State private var draftSide: DraftSide = .front
     
     @FocusState private var inputFocused: Bool
     
@@ -187,6 +194,13 @@ struct WorkspaceView: View {
                     // ===== (C) 固定HUD：箱 + 入力 =====
                     cornerLabels(box: bindingBox(), size: size)
                     inputBar(box: bindingBox())
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+                    let viewMaxY = geo.frame(in: .global).maxY
+                    updateKeyboardHeight(note: note, viewMaxY: viewMaxY)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                    keyboardHeight = 0
                 }
                 .navigationTitle(box.wrappedValue.name)
                 .navigationBarTitleDisplayMode(.inline)
@@ -240,6 +254,7 @@ struct WorkspaceView: View {
             panStart = canvasPan
             scaleStart = canvasScale
         }
+        .ignoresSafeArea(.keyboard)
     }
     
     // MARK: - Desk (cards)
@@ -383,23 +398,63 @@ struct WorkspaceView: View {
         }
     }
     
+    private func updateKeyboardHeight(note: Notification, viewMaxY: CGFloat) {
+        guard
+            let userInfo = note.userInfo,
+            let endFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
+        else { return }
+        
+        let overlap = max(0, viewMaxY - endFrame.minY)
+        keyboardHeight = overlap
+    }
+    
     
     // MARK: - Input bar
     
     private func inputBar(box: Binding<Box>) -> some View {
         HStack(spacing: 12) {
-            TextField("テキスト入力", text: $draftText, axis: .vertical)
-                .focused($inputFocused)
-                .lineLimit(1...3)
-                .textFieldStyle(.roundedBorder)
+            // 左：表/裏 切替ボタン
+            Button {
+                // 切替（入力は保持）
+                draftSide = (draftSide == .front) ? .back : .front
+                haptic.impactOccurred()
+            } label: {
+                Image(systemName: draftSide == .front ? "rectangle.and.pencil.and.ellipsis" : "rectangle.fill.on.rectangle.fill")
+                    .font(.title3)
+                    .padding(10)
+                    .background(.thinMaterial)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(draftSide == .front ? "Switch to back" : "Switch to front")
             
-                .toolbar{
-                    ToolbarItemGroup(placement: .keyboard) {
-                        Spacer()
-                        Button("done") {inputFocused = false}
+            // 中：いまのモードに応じて入力先を変える
+            TextField(
+                draftSide == .front ? "Front（表）" : "Back（裏・任意）",
+                text: Binding(
+                    get: { draftSide == .front ? draftFront : draftBack },
+                    set: { newValue in
+                        if draftSide == .front { draftFront = newValue }
+                        else { draftBack = newValue }
                     }
+                ),
+                axis: .vertical
+            )
+            .focused($inputFocused)
+            .lineLimit(1...3)
+            .textFieldStyle(.roundedBorder)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(draftSide == .front ? Color.primary.opacity(0.15) : tintForCurrentBox()?.opacity(0.55) ?? Color.blue.opacity(0.55), lineWidth: 2)
+            )
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("done") { inputFocused = false }
                 }
+            }
             
+            // 右：＋ = 「カード完成」だけ（裏が空でもOK）
             Button {
                 addCard(box: box)
             } label: {
@@ -416,21 +471,29 @@ struct WorkspaceView: View {
         .frame(maxWidth: 560)
         .frame(maxWidth: .infinity, alignment: .center)
         .frame(maxHeight: .infinity, alignment: .bottom)
+        .padding(.bottom, keyboardHeight)
+        .animation(.easeOut(duration: 0.18), value: keyboardHeight)
     }
     
     private func addCard(box: Binding<Box>) {
-        let trimmed = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let front = draftFront.trimmingCharacters(in: .whitespacesAndNewlines)
+        let back  = draftBack.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Frontは必須。Backは空でOK。
+        guard !front.isEmpty else { return }
         
         var b = box.wrappedValue
         
         let px = min(max(0.5 + Double.random(in: -0.14...0.14), 0.08), 0.92)
         let py = min(max(0.35 + Double.random(in: -0.10...0.10), 0.08), 0.80)
         
-        b.cards.append(Card(front: trimmed, back: "", px: px, py: py))
+        b.cards.append(Card(front: front, back: back, px: px, py: py))
         box.wrappedValue = b
         
-        draftText = ""
+        // 追加後は「表」に戻す（事故防止）
+        draftFront = ""
+        draftBack = ""
+        draftSide = .front
+        
         haptic.impactOccurred()
     }
     
