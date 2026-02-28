@@ -5,7 +5,6 @@
 //  Created by Apex_Ventura on 2026/02/25.
 //
 
-
 import SwiftUI
 import Foundation
 import Combine
@@ -17,8 +16,7 @@ import UIKit
 
 struct Card: Identifiable, Codable, Equatable {
     var id = UUID()
-    var front: String
-    var back: String
+    var text: String
     // normalized position (0...1)
     var px: Double
     var py: Double
@@ -94,9 +92,9 @@ final class AppState: ObservableObject {
         return Box(
             name: "Workspace",
             cards: [
-                Card(front: "Tap to flip", back: "裏面だよ", px: 0.52, py: 0.22),
-                Card(front: "Drag to sort", back: "Flick hard to send", px: 0.48, py: 0.36),
-                Card(front: "Add cards below", back: "Back can be empty", px: 0.55, py: 0.50)
+                Card(text: "Drag cards around", px: 0.52, py: 0.22),
+                Card(text: "Drop into A / B (bottom circles)", px: 0.48, py: 0.36),
+                Card(text: "Use the input bar to create new cards", px: 0.55, py: 0.50)
             ],
             children: [boxA, boxB, boxC, boxD]
         )
@@ -143,22 +141,20 @@ struct WorkspaceView: View {
     // dragging
     @State private var draggingID: UUID? = nil
     @State private var hoverTarget: Int? = nil
+    @State private var dragOffset: CGSize = .zero
     @State private var dragBase: (px: Double, py: Double)? = nil
     @State private var showingRename = false
     @State private var draftNames: [String] = ["A", "B", "C", "D"]
+    @State private var editingID: UUID? = nil
+    @State private var editingText: String = ""
+    @State private var showingEdit: Bool = false
+    @State private var confirmDelete = false
     // --- camera (workspace) ---
     @State private var canvasPan: CGSize = .zero
     @State private var panStart: CGSize = .zero
+    
     @State private var canvasScale: CGFloat = 1.0
     @State private var scaleStart: CGFloat = 1.0
-    @State private var flipped: Set<UUID> = []
-    // input (always at bottom)
-    @State private var draftFront: String = ""
-    @State private var draftBack: String = ""
-    @State private var keyboardHeight: CGFloat = 0
-    
-    enum DraftSide { case front, back }
-    @State private var draftSide: DraftSide = .front
     
     @FocusState private var inputFocused: Bool
     
@@ -194,13 +190,6 @@ struct WorkspaceView: View {
                     // ===== (C) 固定HUD：箱 + 入力 =====
                     cornerLabels(box: bindingBox(), size: size)
                     inputBar(box: bindingBox())
-                }
-                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
-                    let viewMaxY = geo.frame(in: .global).maxY
-                    updateKeyboardHeight(note: note, viewMaxY: viewMaxY)
-                }
-                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-                    keyboardHeight = 0
                 }
                 .navigationTitle(box.wrappedValue.name)
                 .navigationBarTitleDisplayMode(.inline)
@@ -250,24 +239,52 @@ struct WorkspaceView: View {
                 }
             )
         }
+        .sheet(isPresented: $showingEdit) {
+            EditCardSheet(
+                text: $editingText,
+                onCancel: { showingEdit = false },
+                onSave: {
+                    let trimmed = editingText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard let id = editingID, !trimmed.isEmpty else { showingEdit = false; return }
+                    var b = box.wrappedValue
+                    if let idx = b.cards.firstIndex(where: { $0.id == id }) {
+                        b.cards[idx].text = trimmed
+                        box.wrappedValue = b
+                    }
+                    showingEdit = false
+                },
+                onDelete: { confirmDelete = true }
+            )
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+            .confirmationDialog("Delete this card?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button("Delete", role: .destructive) {
+                    guard let id = editingID else { return }
+                    var b = box.wrappedValue
+                    b.cards.removeAll { $0.id == id }
+                    box.wrappedValue = b
+                    showingEdit = false
+                }
+                Button("Cancel", role: .cancel) { }
+            }
+        }
         .onAppear {
             panStart = canvasPan
             scaleStart = canvasScale
         }
-        .ignoresSafeArea(.keyboard)
     }
     
     // MARK: - Desk (cards)
     
     private func cardBoard(box: Binding<Box>, size: CGSize) -> some View {
         ZStack {
-            ForEach(Array(box.wrappedValue.cards.indices), id: \.self) { i in
+            ForEach(box.wrappedValue.cards.indices, id: \.self) { i in
                 let card = box.wrappedValue.cards[i]
                 let x = CGFloat(card.px) * size.width
                 let y = CGFloat(card.py) * size.height
                 let tint = tintForCurrentBox()
                 
-                cardView(front: card.front, back: card.back, isDragging: draggingID == card.id, isFlipped: flipped.contains(card.id), tint: tint)
+                cardView(text: card.text, isDragging: draggingID == card.id, tint: tint)
                     .zIndex(draggingID == card.id ? 10 : 0)
                     .position(x: x, y: y)
                     .gesture(
@@ -313,73 +330,51 @@ struct WorkspaceView: View {
                     )
                     .simultaneousGesture(
                         TapGesture().onEnded {
-                            // ✅ タップで裏返すだけ
-                            if flipped.contains(card.id) { flipped.remove(card.id) }
-                            else { flipped.insert(card.id) }
+                            editingID = card.id
+                            editingText = card.text
+                            showingEdit = true
                             inputFocused = false
                         }
                     )
+                
             }
         }
         .animation(nil, value: draggingID)
     }
     
-    private func cardView(
-        front: String,
-        back: String,
-        isDragging: Bool,
-        isFlipped: Bool,
-        tint: Color?
-    ) -> some View {
+    private func cardView(text: String, isDragging: Bool, tint: Color?) -> some View {
+        
         let t = tint
+        
         let base: Color = {
             guard let t = t else { return .white }
             return t.opacity(0.25)
         }()
         
-        return ZStack {
-            // ===== 表 =====
-            RoundedRectangle(cornerRadius: 20)
-                .fill(base)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20)
-                        .stroke((t ?? .clear).opacity(t == nil ? 0.0 : 0.45), lineWidth: 2)
-                )
-                .overlay(
-                    Text(front)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.leading)
-                        .lineLimit(8)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .padding(12)
-                )
-                .opacity(isFlipped ? 0 : 1)
-            
-            // ===== 裏 =====
-            RoundedRectangle(cornerRadius: 20)
-                .fill(base.opacity(0.90))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20)
-                        .stroke((t ?? .clear).opacity(t == nil ? 0.0 : 0.35), lineWidth: 2)
-                )
-                .overlay(
-                    Text(back.isEmpty ? " " : back) // 空なら何も出さない（見た目用）
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.leading)
-                        .lineLimit(8)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .padding(12)
-                )
-                .opacity(isFlipped ? 1 : 0)
-                .rotation3DEffect(.degrees(180), axis: (x: 0, y: 1, z: 0))
-        }
-        .frame(width: 230, height: 125)
-        .shadow(color: .black.opacity(0.18), radius: 10, y: 6)
-        .scaleEffect(isDragging ? 1.03 : 1.0)
-        .rotation3DEffect(.degrees(isFlipped ? 180 : 0), axis: (x: 0, y: 1, z: 0))
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: isFlipped)
+        return RoundedRectangle(cornerRadius: 20)
+            .fill(base)
+            .overlay(
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke((t ?? .clear).opacity(t == nil ? 0.0 : 0.45), lineWidth: 2)   // ← 枠で“所属感”
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                    .blur(radius: 0.5)
+            )
+        
+            .overlay(
+                Text(text)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(12)
+            )
+            .frame(width: 230, height: 125)
+            .shadow(color: .black.opacity(0.18), radius: 10, y: 6)
+            .scaleEffect(isDragging ? 1.03 : 1.0)
     }
     
     private func targetIndex(from t: CGSize, threshold: CGFloat = 120) -> Int? {
@@ -398,63 +393,23 @@ struct WorkspaceView: View {
         }
     }
     
-    private func updateKeyboardHeight(note: Notification, viewMaxY: CGFloat) {
-        guard
-            let userInfo = note.userInfo,
-            let endFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
-        else { return }
-        
-        let overlap = max(0, viewMaxY - endFrame.minY)
-        keyboardHeight = overlap
-    }
-    
     
     // MARK: - Input bar
     
     private func inputBar(box: Binding<Box>) -> some View {
         HStack(spacing: 12) {
-            // 左：表/裏 切替ボタン
-            Button {
-                // 切替（入力は保持）
-                draftSide = (draftSide == .front) ? .back : .front
-                haptic.impactOccurred()
-            } label: {
-                Image(systemName: draftSide == .front ? "rectangle.and.pencil.and.ellipsis" : "rectangle.fill.on.rectangle.fill")
-                    .font(.title3)
-                    .padding(10)
-                    .background(.thinMaterial)
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(draftSide == .front ? "Switch to back" : "Switch to front")
+            TextField("テキスト入力", text: $draftText, axis: .vertical)
+                .focused($inputFocused)
+                .lineLimit(1...3)
+                .textFieldStyle(.roundedBorder)
             
-            // 中：いまのモードに応じて入力先を変える
-            TextField(
-                draftSide == .front ? "Front（表）" : "Back（裏・任意）",
-                text: Binding(
-                    get: { draftSide == .front ? draftFront : draftBack },
-                    set: { newValue in
-                        if draftSide == .front { draftFront = newValue }
-                        else { draftBack = newValue }
+                .toolbar{
+                    ToolbarItemGroup(placement: .keyboard) {
+                        Spacer()
+                        Button("done") {inputFocused = false}
                     }
-                ),
-                axis: .vertical
-            )
-            .focused($inputFocused)
-            .lineLimit(1...3)
-            .textFieldStyle(.roundedBorder)
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(draftSide == .front ? Color.primary.opacity(0.15) : tintForCurrentBox()?.opacity(0.55) ?? Color.blue.opacity(0.55), lineWidth: 2)
-            )
-            .toolbar {
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("done") { inputFocused = false }
                 }
-            }
             
-            // 右：＋ = 「カード完成」だけ（裏が空でもOK）
             Button {
                 addCard(box: box)
             } label: {
@@ -471,29 +426,21 @@ struct WorkspaceView: View {
         .frame(maxWidth: 560)
         .frame(maxWidth: .infinity, alignment: .center)
         .frame(maxHeight: .infinity, alignment: .bottom)
-        .padding(.bottom, keyboardHeight)
-        .animation(.easeOut(duration: 0.18), value: keyboardHeight)
     }
     
     private func addCard(box: Binding<Box>) {
-        let front = draftFront.trimmingCharacters(in: .whitespacesAndNewlines)
-        let back  = draftBack.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Frontは必須。Backは空でOK。
-        guard !front.isEmpty else { return }
+        let trimmed = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         
         var b = box.wrappedValue
         
+        // spawn around upper-middle
         let px = min(max(0.5 + Double.random(in: -0.14...0.14), 0.08), 0.92)
         let py = min(max(0.35 + Double.random(in: -0.10...0.10), 0.08), 0.80)
         
-        b.cards.append(Card(front: front, back: back, px: px, py: py))
+        b.cards.append(Card(text: trimmed, px: px, py: py))
         box.wrappedValue = b
-        
-        // 追加後は「表」に戻す（事故防止）
-        draftFront = ""
-        draftBack = ""
-        draftSide = .front
-        
+        draftText = ""
         haptic.impactOccurred()
     }
     
@@ -754,6 +701,43 @@ struct RenameBoxesSheet: View {
     }
 }
 
+struct EditCardSheet: View {
+    @Binding var text: String
+    let onCancel: () -> Void
+    let onSave: () -> Void
+    let onDelete: () -> Void
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                TextEditor(text: $text)
+                    .padding(12)
+                    .background(.thinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .padding()
+                
+                Spacer()
+            }
+            .navigationTitle("Edit card")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onCancel() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { onSave() }
+                }
+                ToolbarItem(placement: .bottomBar) {
+                    Button(role: .destructive) {
+                        onDelete()
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct CloudPocketShape: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
@@ -775,5 +759,4 @@ struct CloudPocketShape: Shape {
 #Preview {
     ContentView()
 }
-
 
