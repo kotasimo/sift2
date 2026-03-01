@@ -20,6 +20,8 @@ struct Card: Identifiable, Codable, Equatable {
     // normalized position (0...1)
     var px: Double
     var py: Double
+    var scale: Double = 1.0
+    var backText: String = ""
 }
 
 struct Box: Identifiable, Codable, Equatable {
@@ -149,6 +151,11 @@ struct WorkspaceView: View {
     @State private var editingText: String = ""
     @State private var showingEdit: Bool = false
     @State private var confirmDelete = false
+    @State private var newCardScale: Double = 1.0
+    @State private var newIsSmall: Bool = false
+    @State private var flippedID: UUID? = nil
+    @State private var editingBack = false
+    
     @FocusState private var inputFocused: Bool
     
     enum EdgeSide { case top, bottom, left, right }
@@ -159,16 +166,14 @@ struct WorkspaceView: View {
         let box = bindingBox()
         
         ZStack {
-            Color.yellow.opacity(0.5).ignoresSafeArea()
+            Color(red: 0.94, green: 0.96, blue: 0.98).ignoresSafeArea()
             
             GeometryReader { geo in
                 let size = geo.size
-                let deskW = size.width * 4
-                let deskH = size.height * 4
                 
                 ZStack {
-                    let deskW = size.width * 4
-                    let deskH = size.height * 4
+                    let deskW = size.width
+                    let deskH = size.height
                     
                     // ===== (A) 動くレイヤー：巨大背景 + カード =====
                     ZStack {
@@ -186,7 +191,6 @@ struct WorkspaceView: View {
 
                     // ===== (C) 固定HUD：箱 + 入力 =====
                     cornerLabels(box: bindingBox(), size: size)
-                    inputBar(box: bindingBox())
                 }
                 .navigationTitle(box.wrappedValue.name)
                 .navigationBarTitleDisplayMode(.inline)
@@ -212,12 +216,17 @@ struct WorkspaceView: View {
                         }
                         .accessibilityLabel("Rename boxes")
                     }
+                    
+                    ToolbarItem(placement: .principal) {
+                        headerInputBar(box: bindingBox())
+                    }
                 }
                 .toolbarBackground(headerColor(), for: .navigationBar)
                 .toolbarBackground(.visible, for: .navigationBar)
                 .toolbarColorScheme(.light, for: .navigationBar)
             }
         }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .sheet(isPresented: $showingRename) {
             RenameBoxesSheet(
                 names: $draftNames,
@@ -243,28 +252,41 @@ struct WorkspaceView: View {
                 onCancel: { showingEdit = false },
                 onSave: {
                     let trimmed = editingText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard let id = editingID, !trimmed.isEmpty else { showingEdit = false; return }
+                    guard let id = editingID else { showingEdit = false; return }
                     var b = box.wrappedValue
                     if let idx = b.cards.firstIndex(where: { $0.id == id }) {
-                        b.cards[idx].text = trimmed
+                        if editingBack {
+                            b.cards[idx].backText = trimmed
+                        } else {
+                            b.cards[idx].text = trimmed
+                        }
                         box.wrappedValue = b
                     }
                     showingEdit = false
                 },
-                onDelete: { confirmDelete = true }
-            )
-            .presentationDetents([.medium])
-            .presentationDragIndicator(.visible)
-            .confirmationDialog("Delete this card?", isPresented: $confirmDelete, titleVisibility: .visible) {
-                Button("Delete", role: .destructive) {
+                onDelete: { confirmDelete = true },
+                onShrink: {
+                    // サイズだけトグルする（裏/表の保存はしない）
                     guard let id = editingID else { return }
                     var b = box.wrappedValue
-                    b.cards.removeAll { $0.id == id }
-                    box.wrappedValue = b
-                    showingEdit = false
+                    if let idx = b.cards.firstIndex(where: { $0.id == id }) {
+                        b.cards[idx].scale = (b.cards[idx].scale < 0.95) ? 1.0 : 0.70
+                        box.wrappedValue = b
+                    }
                 }
-                Button("Cancel", role: .cancel) { }
+            )
+        }
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+        .confirmationDialog("Delete this card?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                guard let id = editingID else { return }
+                var b = box.wrappedValue
+                b.cards.removeAll { $0.id == id }
+                box.wrappedValue = b
+                showingEdit = false
             }
+            Button("Cancel", role: .cancel) { }
         }
     }
     
@@ -281,7 +303,7 @@ struct WorkspaceView: View {
                 let y = CGFloat(card.py) * deskH
                 let tint = tintForCurrentBox()
                 
-                cardView(text: card.text, isDragging: draggingID == card.id, tint: tint)
+                cardView(card: card, isDragging: draggingID == card.id, isBack: flippedID == card.id, tint: tint)
                     .zIndex(draggingID == card.id ? 10 : 0)
                     .position(x: x, y: y)
                     .gesture(
@@ -327,10 +349,18 @@ struct WorkspaceView: View {
                     )
                     .simultaneousGesture(
                         TapGesture().onEnded {
+                            if flippedID == card.id {
+                                flippedID = nil
+                            } else {
+                                flippedID = card.id
+                            }
+                        }
+                    )
+                    .simultaneousGesture(
+                        LongPressGesture(minimumDuration: 0.4).onEnded { _ in
                             editingID = card.id
                             editingText = card.text
                             showingEdit = true
-                            inputFocused = false
                         }
                     )
             }
@@ -338,7 +368,7 @@ struct WorkspaceView: View {
         .animation(nil, value: draggingID)
     }
     
-    private func cardView(text: String, isDragging: Bool, tint: Color?) -> some View {
+    private func cardView(card: Card, isDragging: Bool, isBack: Bool, tint: Color?) -> some View {
         
         let t = tint
         
@@ -346,6 +376,8 @@ struct WorkspaceView: View {
             guard let t = t else { return .white }
             return t.opacity(0.25)
         }()
+        
+        let displayText = isBack ? card.backText : card.text
         
         return RoundedRectangle(cornerRadius: 20)
             .fill(base)
@@ -360,17 +392,15 @@ struct WorkspaceView: View {
             )
         
             .overlay(
-                Text(text)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                    .multilineTextAlignment(.leading)
-                    .lineLimit(8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                Text(displayText.isEmpty && isBack ? "（裏はまだ空）" : displayText)
+                    .font(.system(size: 16 * card.scale, weight: isBack ? .regular : .semibold))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .padding(12)
             )
-            .frame(width: 230, height: 125)
+            .frame(width: 210, height: 115)
             .shadow(color: .black.opacity(0.18), radius: 10, y: 6)
-            .scaleEffect(isDragging ? 1.03 : 1.0)
+            .scaleEffect(CGFloat(card.scale) * (isDragging ? 1.03 : 1.0))
     }
     
     private func targetIndex(from t: CGSize, threshold: CGFloat = 120) -> Int? {
@@ -405,6 +435,16 @@ struct WorkspaceView: View {
                         Button("done") {inputFocused = false}
                     }
                 }
+            Button {
+                // 押すたび少し小さく（下限で止まる）
+                newIsSmall.toggle()
+                haptic.impactOccurred()
+            } label: {
+                Image(systemName: newIsSmall ? "textformat.size.larger" : "textformat.size.smaller")
+                    .font(.title3)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Toggle new card size")
             
             Button {
                 addCard(box: box)
@@ -420,8 +460,8 @@ struct WorkspaceView: View {
         .background(.thinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .frame(maxWidth: 560)
-        .frame(maxWidth: .infinity, alignment: .center)
-        .frame(maxHeight: .infinity, alignment: .bottom)
+        .frame(maxWidth: .infinity, alignment: .top)
+        .padding(.top, 10)
     }
     
     private func addCard(box: Binding<Box>) {
@@ -433,8 +473,9 @@ struct WorkspaceView: View {
         // spawn around upper-middle
         let px = min(max(0.5 + Double.random(in: -0.14...0.14), 0.08), 0.92)
         let py = min(max(0.35 + Double.random(in: -0.10...0.10), 0.08), 0.80)
+        let s: Double = newIsSmall ? 0.75 : 1.0
         
-        b.cards.append(Card(text: trimmed, px: px, py: py))
+        b.cards.append(Card(text: trimmed, px: px, py: py, scale: s))
         box.wrappedValue = b
         draftText = ""
         haptic.impactOccurred()
@@ -633,6 +674,29 @@ struct WorkspaceView: View {
         return boxColor(forIndex: i).opacity(0.85)
     }
     
+    private func headerInputBar(box: Binding<Box>) -> some View {
+        HStack(spacing: 10) {
+            TextField("テキスト入力", text: $draftText)
+                .textFieldStyle(.roundedBorder)
+                .focused($inputFocused)
+                .frame(maxWidth: .infinity)
+            Button {
+                addCard(box: box)
+            } label: {
+                Image(systemName: "plus.circle.fill")
+            }
+            .buttonStyle(.plain)
+            
+            Button {
+                inputFocused = false
+            } label: {
+                Text("done")
+            }
+            .font(.subheadline.weight(.semibold))
+        }
+        .frame(maxWidth: 900)
+        
+    }
 }
 
 struct RenameBoxesSheet: View {
@@ -670,12 +734,22 @@ struct RenameBoxesSheet: View {
 
 struct EditCardSheet: View {
     @Binding var text: String
+    @State private var editingBack = false
+    
     let onCancel: () -> Void
     let onSave: () -> Void
     let onDelete: () -> Void
+    let onShrink: () -> Void
     var body: some View {
         NavigationStack {
             VStack(spacing: 12) {
+                Picker("", selection: $editingBack) {
+                    Text("表").tag(false)
+                    Text("裏").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                
                 TextEditor(text: $text)
                     .padding(12)
                     .background(.thinMaterial)
@@ -698,6 +772,13 @@ struct EditCardSheet: View {
                         onDelete()
                     } label: {
                         Label("Delete", systemImage: "trash")
+                    }
+                }
+                ToolbarItem(placement: .bottomBar) {
+                    Button {
+                        onShrink()
+                    } label: {
+                        Label("Small", systemImage: "arrow.down.right.and.arrow.up.left")
                     }
                 }
             }
