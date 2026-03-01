@@ -149,13 +149,6 @@ struct WorkspaceView: View {
     @State private var editingText: String = ""
     @State private var showingEdit: Bool = false
     @State private var confirmDelete = false
-    // --- camera (workspace) ---
-    @State private var canvasPan: CGSize = .zero
-    @State private var panStart: CGSize = .zero
-    
-    @State private var canvasScale: CGFloat = 1.0
-    @State private var scaleStart: CGFloat = 1.0
-    
     @FocusState private var inputFocused: Bool
     
     enum EdgeSide { case top, bottom, left, right }
@@ -174,23 +167,6 @@ struct WorkspaceView: View {
                 let deskH = size.height * 4
                 
                 ZStack {
-                    // ===== (A) 動くレイヤー：巨大背景 + カード =====
-                    ZStack {
-                        Rectangle()
-                            .fill(Color(red: 0.94, green: 0.96, blue: 0.98))
-                            .frame(width: deskW * 4, height: deskH * 4)
-                            
-                        
-                        cardBoard(box: bindingBox(), size: size, deskSize: CGSize(width: deskW, height: deskH))
-                    }
-                    .frame(width: deskW, height: deskH)
-                    .position(x: size.width / 2, y: size.height / 2)
-                    .contentShape(Rectangle())
-                    .gesture(panGesture())
-                    .simultaneousGesture(zoomGesture())
-                    .scaleEffect(canvasScale)
-                    .offset(canvasPan)
-                    
                     let deskW = size.width * 4
                     let deskH = size.height * 4
                     
@@ -207,12 +183,7 @@ struct WorkspaceView: View {
                     }
                     .frame(width: deskW, height: deskH)
                     .position(x: size.width / 2, y: size.height / 2)
-                    .contentShape(Rectangle())
-                    .gesture(panGesture())
-                    .simultaneousGesture(zoomGesture())
-                    .scaleEffect(canvasScale)
-                    .offset(canvasPan)
-                    
+
                     // ===== (C) 固定HUD：箱 + 入力 =====
                     cornerLabels(box: bindingBox(), size: size)
                     inputBar(box: bindingBox())
@@ -223,11 +194,7 @@ struct WorkspaceView: View {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
                             path = NavigationPath()        // ← rootへ戻す（これが本命）
-                            state.resetToDefaults()        // ← データ初期
-                            canvasPan = .zero              // ← ついでに視点も戻す（任意）
-                            panStart = .zero
-                            canvasScale = 1.0              // ← 任意
-                            scaleStart = 1.0
+                            state.resetToDefaults()
                         } label: {
                             Image(systemName: "arrow.counterclockwise")
                         }
@@ -299,10 +266,6 @@ struct WorkspaceView: View {
                 Button("Cancel", role: .cancel) { }
             }
         }
-        .onAppear {
-            panStart = canvasPan
-            scaleStart = canvasScale
-        }
     }
     
     // MARK: - Desk (cards)
@@ -335,14 +298,14 @@ struct WorkspaceView: View {
                                 // ここが核心：px/py を直接更新（アニメ無し）
                                 guard let base = dragBase else { return }
                                 
-                                let dx = value.translation.width / canvasScale
-                                let dy = value.translation.height / canvasScale
+                                let dx = value.translation.width
+                                let dy = value.translation.height
                                 
                                 let newX = CGFloat(base.px) * deskW + dx
                                 let newY = CGFloat(base.py) * deskH + dy
                                 
                                 let clampedX = min(max(newX, 30), deskW - 30)
-                                let clampedY = min(max(newY, 30), deskH - 200)
+                                let clampedY = min(max(newY, 30), deskH - 30)
                                 
                                 var b = box.wrappedValue
                                 guard let idx = b.cards.firstIndex(where: { $0.id == card.id }) else { return }
@@ -494,7 +457,9 @@ struct WorkspaceView: View {
                 } else {
                     state.root = newValue
                 }
-                state.scheduleSave()
+                if draggingID == nil {
+                    state.scheduleSave()
+                }
             }
         )
     }
@@ -668,37 +633,6 @@ struct WorkspaceView: View {
         return boxColor(forIndex: i).opacity(0.85)
     }
     
-    private func panGesture() -> some Gesture {
-        DragGesture()
-            .onChanged { value in
-                guard draggingID == nil else { return } // カード掴んでる時はパンしない
-                canvasPan = CGSize(
-                    width: panStart.width + value.translation.width,
-                    height: panStart.height + value.translation.height
-                )
-            }
-            .onEnded { _ in
-                panStart = canvasPan
-            }
-    }
-    
-    private func zoomGesture() -> some Gesture {
-        MagnificationGesture()
-            .onChanged { m in
-                // 拡大方向（m > 1）は無視する
-                guard m <= 1.0 else {
-                    canvasScale = min(canvasScale, 1.0)
-                    return
-                }
-                let next = scaleStart * m
-                canvasScale = max(next, 0.4)   // 下限だけ効かせる（上限は guard で殺してる）
-            }
-            .onEnded { _ in
-                // 念のため 1.0 を超えない状態で確定
-                canvasScale = min(canvasScale, 1.0)
-                scaleStart = canvasScale
-            }
-    }
 }
 
 struct RenameBoxesSheet: View {
