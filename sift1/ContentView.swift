@@ -170,20 +170,46 @@ struct WorkspaceView: View {
             
             GeometryReader { geo in
                 let size = geo.size
+                let deskW = size.width * 4
+                let deskH = size.height * 4
                 
                 ZStack {
                     // ===== (A) 動くレイヤー：巨大背景 + カード =====
                     ZStack {
                         Rectangle()
                             .fill(Color(red: 0.94, green: 0.96, blue: 0.98))
-                            .frame(width: size.width * 4, height: size.height * 4)
-                            .position(x: size.width / 2, y: size.height / 2)
-                            .contentShape(Rectangle())
-                            .gesture(panGesture())
-                            .simultaneousGesture(zoomGesture())
+                            .frame(width: deskW * 4, height: deskH * 4)
+                            
                         
-                        cardBoard(box: bindingBox(), size: size)
+                        cardBoard(box: bindingBox(), size: size, deskSize: CGSize(width: deskW, height: deskH))
                     }
+                    .frame(width: deskW, height: deskH)
+                    .position(x: size.width / 2, y: size.height / 2)
+                    .contentShape(Rectangle())
+                    .gesture(panGesture())
+                    .simultaneousGesture(zoomGesture())
+                    .scaleEffect(canvasScale)
+                    .offset(canvasPan)
+                    
+                    let deskW = size.width * 4
+                    let deskH = size.height * 4
+                    
+                    // ===== (A) 動くレイヤー：巨大背景 + カード =====
+                    ZStack {
+                        Rectangle()
+                            .fill(Color(red: 0.94, green: 0.96, blue: 0.98))
+                            .frame(width: deskW, height: deskH)
+                        cardBoard(
+                            box: bindingBox(),
+                            size: size,
+                            deskSize: CGSize(width: deskW, height: deskH)
+                        )
+                    }
+                    .frame(width: deskW, height: deskH)
+                    .position(x: size.width / 2, y: size.height / 2)
+                    .contentShape(Rectangle())
+                    .gesture(panGesture())
+                    .simultaneousGesture(zoomGesture())
                     .scaleEffect(canvasScale)
                     .offset(canvasPan)
                     
@@ -196,7 +222,12 @@ struct WorkspaceView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
-                            state.resetToDefaults()
+                            path = NavigationPath()        // ← rootへ戻す（これが本命）
+                            state.resetToDefaults()        // ← データ初期
+                            canvasPan = .zero              // ← ついでに視点も戻す（任意）
+                            panStart = .zero
+                            canvasScale = 1.0              // ← 任意
+                            scaleStart = 1.0
                         } label: {
                             Image(systemName: "arrow.counterclockwise")
                         }
@@ -276,12 +307,15 @@ struct WorkspaceView: View {
     
     // MARK: - Desk (cards)
     
-    private func cardBoard(box: Binding<Box>, size: CGSize) -> some View {
-        ZStack {
+    private func cardBoard(box: Binding<Box>, size: CGSize, deskSize: CGSize) -> some View {
+        let deskW = deskSize.width
+        let deskH = deskSize.height
+        
+        return ZStack {
             ForEach(box.wrappedValue.cards.indices, id: \.self) { i in
                 let card = box.wrappedValue.cards[i]
-                let x = CGFloat(card.px) * size.width
-                let y = CGFloat(card.py) * size.height
+                let x = CGFloat(card.px) * deskW
+                let y = CGFloat(card.py) * deskH
                 let tint = tintForCurrentBox()
                 
                 cardView(text: card.text, isDragging: draggingID == card.id, tint: tint)
@@ -304,11 +338,11 @@ struct WorkspaceView: View {
                                 let dx = value.translation.width / canvasScale
                                 let dy = value.translation.height / canvasScale
                                 
-                                let newX = CGFloat(base.px) * size.width + dx
-                                let newY = CGFloat(base.py) * size.height + dy
+                                let newX = CGFloat(base.px) * deskW + dx
+                                let newY = CGFloat(base.py) * deskH + dy
                                 
-                                let clampedX = min(max(newX, 30), size.width - 30)
-                                let clampedY = min(max(newY, 30), size.height - 200)
+                                let clampedX = min(max(newX, 30), deskW - 30)
+                                let clampedY = min(max(newY, 30), deskH - 200)
                                 
                                 var b = box.wrappedValue
                                 guard let idx = b.cards.firstIndex(where: { $0.id == card.id }) else { return }
@@ -316,8 +350,8 @@ struct WorkspaceView: View {
                                 var tx = Transaction()
                                 tx.animation = nil
                                 withTransaction(tx) {
-                                    b.cards[idx].px = Double(clampedX / size.width)
-                                    b.cards[idx].py = Double(clampedY / size.height)
+                                    b.cards[idx].px = Double(clampedX / deskW)
+                                    b.cards[idx].py = Double(clampedY / deskH)
                                     box.wrappedValue = b
                                 }
                             }
@@ -336,7 +370,6 @@ struct WorkspaceView: View {
                             inputFocused = false
                         }
                     )
-                
             }
         }
         .animation(nil, value: draggingID)
