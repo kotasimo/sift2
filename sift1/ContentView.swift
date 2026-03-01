@@ -217,14 +217,18 @@ struct WorkspaceView: View {
                         .accessibilityLabel("Rename boxes")
                     }
                     
-                    ToolbarItem(placement: .principal) {
-                        headerInputBar(box: bindingBox())
-                    }
                 }
                 .toolbarBackground(headerColor(), for: .navigationBar)
                 .toolbarBackground(.visible, for: .navigationBar)
                 .toolbarColorScheme(.light, for: .navigationBar)
             }
+        }
+        .safeAreaInset(edge: .top) {
+            headerInputBar(box: bindingBox())
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+                .padding(.bottom, 8)
+                .background(.thinMaterial)
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .sheet(isPresented: $showingRename) {
@@ -246,9 +250,14 @@ struct WorkspaceView: View {
                 }
             )
         }
+        .onChange(of: editingBack) { _, newValue in
+            guard let id = editingID else { return }
+            loadEditingText(for: id, back: newValue, box: bindingBox())
+        }
         .sheet(isPresented: $showingEdit) {
             EditCardSheet(
                 text: $editingText,
+                editingBack: $editingBack,
                 onCancel: { showingEdit = false },
                 onSave: {
                     let trimmed = editingText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -359,7 +368,8 @@ struct WorkspaceView: View {
                     .simultaneousGesture(
                         LongPressGesture(minimumDuration: 0.4).onEnded { _ in
                             editingID = card.id
-                            editingText = card.text
+                            editingText = (flippedID == card.id) ? card.backText : card.text
+                            editingBack = (flippedID == card.id)
                             showingEdit = true
                         }
                     )
@@ -589,9 +599,13 @@ struct WorkspaceView: View {
             Text(text)
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.black.opacity(0.95))
+                .lineLimit(1)                 // ← 折り返し禁止
+                .minimumScaleFactor(0.6)      // ← 入らない時は縮小
+                .allowsTightening(true)       // ← ちょい詰めて入れる
+                .truncationMode(.tail)        // ← それでも無理なら…で切る
                 .rotationEffect(.degrees(side == .left ? 90 :
                                             side == .right ? -90 : 0))
-                .padding(16)
+                .padding()
         }
         .frame(
             width: isVertical ? 80 : 420,
@@ -614,7 +628,7 @@ struct WorkspaceView: View {
                     cornerLabel(text: state.root.children[2].name, active: hoverTarget == 2, side: .top, index: 2)
                 }
                 .buttonStyle(.plain)
-                .position(x: size.width / 2, y: 55)
+                .position(x: size.width / 2, y: 50)
                 
                 // 下
                 Button {
@@ -623,7 +637,7 @@ struct WorkspaceView: View {
                     cornerLabel(text: state.root.children[3].name, active: hoverTarget == 3, side: .bottom, index: 3)
                 }
                 .buttonStyle(.plain)
-                .position(x: size.width / 2, y: size.height - 110)
+                .position(x: size.width / 2, y: size.height - 50)
                 
                 // 左
                 Button {
@@ -669,7 +683,7 @@ struct WorkspaceView: View {
     
     private func headerColor() -> Color {
         guard let i = currentIndex else {
-            return Color.blue.opacity(0.25)   // root は薄い青
+            return Color.yellow.opacity(0.25)   // root は薄い青
         }
         return boxColor(forIndex: i).opacity(0.85)
     }
@@ -679,7 +693,7 @@ struct WorkspaceView: View {
             TextField("テキスト入力", text: $draftText)
                 .textFieldStyle(.roundedBorder)
                 .focused($inputFocused)
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: 600)
             Button {
                 addCard(box: box)
             } label: {
@@ -689,13 +703,19 @@ struct WorkspaceView: View {
             
             Button {
                 inputFocused = false
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                                to: nil, from: nil, for: nil)
             } label: {
                 Text("done")
             }
             .font(.subheadline.weight(.semibold))
         }
-        .frame(maxWidth: 900)
-        
+    }
+    
+    private func loadEditingText(for id: UUID, back: Bool, box: Binding<Box>) {
+        let b = box.wrappedValue
+        guard let idx = b.cards.firstIndex(where: { $0.id == id }) else { return }
+        editingText = back ? b.cards[idx].backText : b.cards[idx].text
     }
 }
 
@@ -734,12 +754,13 @@ struct RenameBoxesSheet: View {
 
 struct EditCardSheet: View {
     @Binding var text: String
-    @State private var editingBack = false
+    @Binding var editingBack: Bool
     
     let onCancel: () -> Void
     let onSave: () -> Void
     let onDelete: () -> Void
     let onShrink: () -> Void
+    
     var body: some View {
         NavigationStack {
             VStack(spacing: 12) {
